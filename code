@@ -1,0 +1,247 @@
+# ── STEP 1: IMPORT LIBRARIES ──────────────────────────────────
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    roc_curve,
+    ConfusionMatrixDisplay,
+)
+
+import shap
+import warnings
+warnings.filterwarnings("ignore")
+
+print("Libraries imported successfully!\n")
+
+
+# ── STEP 2: LOAD DATASET ─────────────────────────────────────
+# Download from Kaggle and place heart.csv in the same folder,
+# OR use the built-in UCI version via a direct URL:
+
+url = "https://raw.githubusercontent.com/dsrscientist/dataset1/master/heartdisease.csv"
+
+try:
+    df = pd.read_csv(url)
+    print("Dataset loaded from URL")
+except Exception:
+    # Fallback: load locally
+    df = pd.read_csv("heart.csv")
+    print("Dataset loaded locally")
+
+print(f"   Shape: {df.shape}")
+print(df.head())
+
+
+# ── STEP 3: EXPLORATORY DATA ANALYSIS (EDA) ──────────────────
+print("\n──── Basic Info ────")
+print(df.info())
+
+print("\n──── Missing Values ────")
+print(df.isnull().sum())
+
+print("\n──── Class Distribution ────")
+print(df["target"].value_counts())
+# 0 = No disease, 1 = Disease
+
+# -- Plot 1: Target distribution
+plt.figure(figsize=(5, 4))
+df["target"].value_counts().plot(kind="bar", color=["steelblue", "tomato"])
+plt.title("Heart Disease Distribution")
+plt.xticks([0, 1], ["No Disease (0)", "Disease (1)"], rotation=0)
+plt.ylabel("Count")
+plt.tight_layout()
+plt.savefig("plot_01_target_distribution.png", dpi=120)
+plt.show()
+print("Plot saved: plot_01_target_distribution.png")
+
+# -- Plot 2: Correlation heatmap
+plt.figure(figsize=(12, 8))
+sns.heatmap(df.corr(), annot=True, fmt=".2f", cmap="coolwarm", linewidths=0.5)
+plt.title("Feature Correlation Heatmap")
+plt.tight_layout()
+plt.savefig("plot_02_correlation_heatmap.png", dpi=120)
+plt.show()
+print("Plot saved: plot_02_correlation_heatmap.png")
+
+# -- Plot 3: Age distribution by target
+plt.figure(figsize=(8, 5))
+df.groupby("target")["age"].plot(kind="kde")
+plt.title("Age Distribution by Heart Disease Status")
+plt.xlabel("Age")
+plt.legend(["No Disease", "Disease"])
+plt.tight_layout()
+plt.savefig("plot_03_age_distribution.png", dpi=120)
+plt.show()
+print("Plot saved: plot_03_age_distribution.png")
+
+
+# ── STEP 4: FEATURE ENGINEERING ──────────────────────────────
+# The dataset columns:
+#   age, sex, cp (chest pain), trestbps, chol, fbs, restecg,
+#   thalach (max heart rate), exang, oldpeak, slope, ca, thal, target
+
+# Create a meaningful derived feature
+df["age_thalach_ratio"] = df["age"] / (df["thalach"] + 1)
+# Higher ratio = older + lower max HR → possibly higher risk
+
+print("\nFeature engineering done. New feature: age_thalach_ratio")
+print(df[["age", "thalach", "age_thalach_ratio"]].head())
+
+
+# ── STEP 5: PREPROCESSING ────────────────────────────────────
+X = df.drop("target", axis=1)
+y = df["target"]
+
+# Train / test split (80% train, 20% test)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Standardise numeric features (important for Logistic Regression)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled  = scaler.transform(X_test)
+
+print(f"\nData split — Train: {X_train.shape}, Test: {X_test.shape}")
+
+
+# ── STEP 6: TRAIN MODELS ─────────────────────────────────────
+
+# Helper to evaluate any model
+def evaluate_model(name, model, X_tr, X_te, y_tr, y_te):
+    model.fit(X_tr, y_tr)
+    y_pred  = model.predict(X_te)
+    y_proba = model.predict_proba(X_te)[:, 1]
+
+    print(f"\n{'='*50}")
+    print(f"  MODEL: {name}")
+    print(f"{'='*50}")
+    print(classification_report(y_te, y_pred,
+                                target_names=["No Disease", "Disease"]))
+    roc = roc_auc_score(y_te, y_proba)
+    print(f"  ROC-AUC Score : {roc:.4f}")
+
+    # Cross-validation
+    cv = cross_val_score(model, X_tr, y_tr, cv=5, scoring="roc_auc")
+    print(f"  CV ROC-AUC    : {cv.mean():.4f} ± {cv.std():.4f}")
+
+    return model, y_pred, y_proba, roc
+
+
+# ── Model A: Logistic Regression ──
+lr = LogisticRegression(max_iter=1000, random_state=42)
+lr, lr_pred, lr_proba, lr_roc = evaluate_model(
+    "Logistic Regression", lr,
+    X_train_scaled, X_test_scaled, y_train, y_test
+)
+
+# ── Model B: Random Forest ──
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+rf, rf_pred, rf_proba, rf_roc = evaluate_model(
+    "Random Forest", rf,
+    X_train, X_test, y_train, y_test       # tree models don't need scaling
+)
+
+# ── Model C: XGBoost ──
+xgb = XGBClassifier(n_estimators=100, use_label_encoder=False,
+                     eval_metric="logloss", random_state=42)
+xgb, xgb_pred, xgb_proba, xgb_roc = evaluate_model(
+    "XGBoost", xgb,
+    X_train, X_test, y_train, y_test
+)
+
+
+# ── STEP 7: VISUALISE RESULTS ────────────────────────────────
+
+# -- Plot 4: Confusion matrices (side by side)
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, (name, pred) in zip(axes, [
+    ("Logistic Regression", lr_pred),
+    ("Random Forest",       rf_pred),
+    ("XGBoost",             xgb_pred),
+]):
+    cm = confusion_matrix(y_test, pred)
+    disp = ConfusionMatrixDisplay(cm, display_labels=["No Disease", "Disease"])
+    disp.plot(ax=ax, colorbar=False, cmap="Blues")
+    ax.set_title(name)
+plt.suptitle("Confusion Matrices", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.savefig("plot_04_confusion_matrices.png", dpi=120)
+plt.show()
+print("Plot saved: plot_04_confusion_matrices.png")
+
+# -- Plot 5: ROC Curves
+plt.figure(figsize=(8, 6))
+for name, proba, roc in [
+    ("Logistic Regression", lr_proba,  lr_roc),
+    ("Random Forest",       rf_proba,  rf_roc),
+    ("XGBoost",             xgb_proba, xgb_roc),
+]:
+    fpr, tpr, _ = roc_curve(y_test, proba)
+    plt.plot(fpr, tpr, label=f"{name} (AUC = {roc:.3f})")
+
+plt.plot([0, 1], [0, 1], "k--", label="Random Classifier")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves — All Models")
+plt.legend()
+plt.tight_layout()
+plt.savefig("plot_05_roc_curves.png", dpi=120)
+plt.show()
+print("Plot saved: plot_05_roc_curves.png")
+
+# -- Plot 6: Feature importance (Random Forest)
+importances = pd.Series(rf.feature_importances_, index=X.columns)
+importances.sort_values().plot(kind="barh", figsize=(8, 6), color="steelblue")
+plt.title("Feature Importance — Random Forest")
+plt.xlabel("Importance Score")
+plt.tight_layout()
+plt.savefig("plot_06_feature_importance.png", dpi=120)
+plt.show()
+print("Plot saved: plot_06_feature_importance.png")
+
+
+# ── STEP 8: SHAP EXPLAINABILITY (Advanced) ───────────────────
+print("\n⚙️  Computing SHAP values for XGBoost...")
+
+explainer   = shap.TreeExplainer(xgb)
+shap_values = explainer.shap_values(X_test)
+
+# Summary plot — global feature impact
+shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+plt.title("SHAP Feature Importance (XGBoost)")
+plt.tight_layout()
+plt.savefig("plot_07_shap_summary.png", dpi=120)
+plt.show()
+print("Plot saved: plot_07_shap_summary.png")
+
+# Beeswarm plot — direction + magnitude
+shap.summary_plot(shap_values, X_test, show=False)
+plt.tight_layout()
+plt.savefig("plot_08_shap_beeswarm.png", dpi=120)
+plt.show()
+print("Plot saved: plot_08_shap_beeswarm.png")
+
+
+# ── STEP 9: MODEL COMPARISON SUMMARY ─────────────────────────
+summary = pd.DataFrame({
+    "Model":   ["Logistic Regression", "Random Forest", "XGBoost"],
+    "ROC-AUC": [round(lr_roc, 4), round(rf_roc, 4), round(xgb_roc, 4)],
+})
+print("\n──── Final Model Comparison ────")
+print(summary.to_string(index=False))
+
+best = summary.loc[summary["ROC-AUC"].idxmax(), "Model"]
+print(f"\n Best model: {best}")
+print("\n All done! Check the generated PNG files for visualisations.")
